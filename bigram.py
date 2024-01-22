@@ -59,8 +59,9 @@ class BigramLanguageModel(nn.Module):
 
     def __init__(self, vocab_size):
         super().__init__()
+        # embedding table turns tokens into vectors of fixed size
         self.token_embedding_table = nn.Embedding(vocab_size, vocab_size)
-    
+        
     def forward(self, idx, targets=None):
         logits = self.token_embedding_table(idx)
         if targets is None:
