@@ -1,4 +1,22 @@
 import torch
+import torch.nn as nn
+from torch.nn import functional as F
+
+# hyperparameters
+batch_size = 64 # how many independent sequences will we process in parallel?
+block_size = 256 # what is the maximum context length for predictions?
+max_iters = 5000
+eval_interval = 500
+learning_rate = 3e-4
+device = 'cuda' if torch.cuda.is_available() else 'cpu'
+eval_iters = 200
+n_embd = 384
+n_head = 6
+n_layer = 6
+dropout = 0.2
+# ------------
+
+torch.manual_seed(1337)
 
 with open('alpaca_data.json', 'r', encoding='utf-8') as r:
     text = r.read()
@@ -31,14 +49,6 @@ n = int(0.9*(len(data)))
 train_data = data[:n]
 val_data = data[n:]
 
-# Never train on entire dataset, train on chunks at a time
-block_size = 8
-print(train_data[:block_size + 1])
-
-torch.manual_seed(1337)
-batch_size = 4 # Number of concurrent sequences being processed
-block_size = 8 # Maximum context length for predictions
-
 def get_batch(split):
     data = train_data if split == 'train' else val_data
     # Generate random integers (points) in the dataset to get chunks from
@@ -48,13 +58,20 @@ def get_batch(split):
     y = torch.stack([data[i+1:i+block_size+1] for i in ix])
     return x, y
 
-xb, yb = get_batch('train')
-print('inputs:')
-print(xb.shape)
-print(xb)
-print('targets:')
-print(yb.shape)
-print(yb)
+@torch.no_grad()
+def estimate_loss():
+    out = {}
+    model.eval()
+    for split in ['train', 'val']:
+        losses = torch.zeros(eval_iters)
+        for k in range(eval_iters):
+            X, Y = get_batch(split)
+            logits, loss = model(X, Y)
+            losses[k] = loss.item()
+        out[split] = losses.mean()
+    model.train()
+    return out
+
 
 # KQV are the key, query, and value matrices
 
