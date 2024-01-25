@@ -2,9 +2,9 @@ import torch
 import torch.nn as nn
 from torch.nn import functional as F
 
-# hyperparameters
-batch_size = 64 # how many independent sequences will we process in parallel?
-block_size = 256 # what is the maximum context length for predictions?
+# Hyperparameters
+batch_size = 64 # How many independent sequences will we process in parallel?
+block_size = 256 # What is the maximum context length for predictions?
 max_iters = 5000
 eval_interval = 500
 learning_rate = 3e-4
@@ -73,84 +73,180 @@ def estimate_loss():
     return out
 
 class Head(nn.Module):
+    """Self attention: (Scaled Dot-Product Attention)"""
     """ one head of self-attention """
+
     def __init__(self, head_size):
         super().__init__()
+        # K,Q,V are the key, query, and value matrices
+        # Embeddings: similar words are assigned to similar points in space
+        # Can be in any number of dimensions
+        # Words are initially assigned random embeddings which are adjusted through training
+
+        # Based on context, words are attracted to other words at varying magnitudes
+        # All words pull other words (gravity)
+
         self.key = nn.Linear(n_embd, head_size, bias=False)
         self.query = nn.Linear(n_embd, head_size, bias=False)
         self.value = nn.Linear(n_embd, head_size, bias=False)
         self.register_buffer('tril', torch.tril(torch.ones(block_size, block_size)))
-# KQV are the key, query, and value matrices
+        self.dropout = nn.Dropout(dropout)
 
-# Embeddings: similar words are assigned to similar points in space
-# Can be in any number of dimensions
-# Words are initially assigned random embeddings which are adjusted through training.
+    def forward(self, x):
+        # Perform a linear transformation by multiplying our embedding by K and Q (matrix multiplication)
+        # Calculate similiarites
+        # Apply the Softmax function to our values
+        # Multiply by matrix V to apply another linear transformation
+        # Results in an embedding optimized for prediction
+        
+        # input of size (batch, time-step, channel)
+        # output of size (batch, time-step, head size)
+        B,T,C = x.shape
+        k = self.key(x) # (B, T, hs)
+        q = self.query(x) # (B, T, hs)
+        # compute our attention scores
+        wei = q @ k.transpose(-2,1) * k.shape[-1]**-0.5
+        wei = wei.masked_fill(self.tril[:T, :T] == 0, float('-inf'))
+        wei = F.softmax(wei, dim=-1)
+        wei = self.dropout(wei)
+        # perform weighted aggregation of the values
+        v = self.value(v)
+        out = wei @ v
+        return out
 
-# Based on context, a word is attracted to other words at varying magnitudes (gravity)
-# All words pull other words
+class MultiHeadAttention(nn.Module):
+    """multiple heads of self-attention in parallel"""
+    # The more layers, the better = more computing power needed
+    # At the end, we concatenate the outputs of our layers, resulting an an embedding with high dimensions
+    # Linear step turns our concatenated embedding into one of lower dimension
+    # Worse embeddings will be scaled down, better ones will be scale up
+    def __init__(self, num_heads, head_size):
+        super().__init__()
+        self.heads = nn.ModuleList([Head(head_size) for _ in range(num_heads)])
+        self.proj = nn.Linear(head_size * num_heads, n_embd)
+        self.dropout = nn.Dropout()
+    
+    def forward(self, x):
+        out = torch.cat([h(x) for h in self.heads], dim=-1)
+        out = self.dropout(self.proj(out))
+        return out
 
-# Three methods to measure similarity:
-# Generally, greater value = more similar
-# In extreme cases, a dot product or cosine similarity of 0 means no correlation
+class FeedForward(nn.Module):
+    """ a simple linear layer followed by a non linearity """
 
-# Measure 1: Dot product
-# Calculating the dot product of two matrices gives us a measure of similarity
-# Where each number in the matrix may represent a different attribute of the word's meaning
-# Dot product of 0 indicates no similarity (points are perpendicular)
-# Can result in a negative value as well
- 
-# Measure 2: Cosine similarity
-# Calculating the cosine of the angle between the two vectors from the origin
-# Angle can be found with arccosine (using our vectors)
-# A value of 1 would indicate the word being compared to itself
-# Cos(0) = 1 (No distance between the points)
+    def __init__(self, n_embd):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(n_embd, 4 * n_embd),
+            nn.ReLU(),
+            nn.Linear(4 * n_embd, n_embd),
+            nn.Dropout(dropout),
+        )
+    def forward(self, x):
+        return self.net(x)
 
-# Dot product and cosine similarity are alike 
-# If vectors are scaled down to length 1 and placed on the unit circle, they are the same
-# Same up to a scalar
+class Block(nn.Module):
+    """ Transformer block: communication followed by computation """
 
-# Measure 3: Scaled dot product
-# Dot product divided by the square root of the length of the vector (number of coordinates or values in the matrix)
-# Measure used in attention
+    def __init__(self, n_embd, n_head):
+        # n_embd: embedding dimension, n_head: the number of heads we'd like
+        super().__init__()
+        head_size = n_embd // n_head
+        self.sa = MultiHeadAttention(n_head, head_size)
+        self.ffwd = FeedForward(n_embd)
+        self.ln1 = nn.LayerNorm(n_embd)
+        self.ln2 = nn.LayerNorm(n_embd)
 
-# Attention: Adjust position for a word vector based on similarity
-# New position is the sum of the word's dot product with each other word in the sentence (add all our similarities together)
+    def forward(self, x):
+        x = x + self.sa(self.ln1(x))
+        x = x + self.ffwd(self.ln2(x))
+        return x
 
-# Normalization: similarity values should be normalized to smaller values for easier computation
-# We want percentages where the coefficients add to 1.
-# Achieve this by dividing by the sum of our coefficients.
-# However, this does not account for negative values of similarity, which can result in dividing by 0.
+class GPTLanguageModel(nn.Module):
 
-# So we use Softmax: where the coefficient in our calculations is replaced by e^(coefficient)
-# This method preserves the magnitude of similarity while making everything positive.
-# If you simply made every negative value positive, it ruins the measure of similarity.
-# However, e^0 is not the same as a coefficient of 0. In practice, however, it comes out as a negligible number. 
-# We use our coefficients as a percent to move them that amount towards the word they were being compared to.
+    def __init__(self):
+        super().__init__()
+        # each token directly reads off the logits for the next token from a lookup table
+        self.token_embedding_table = nn.Embedding(vocab_size, n_embd)
+        self.position_embedding_table = nn.Embedding(block_size, n_embd)
+        self.blocks = nn.Sequential(*[Block(n_embd, n_head=n_head) for _ in range(n_layer)])
+        self.ln_f = nn.LayerNorm(n_embd) # final layer norm
+        self.lm_head = nn.Linear(n_embd, vocab_size)
 
-# Get new embeddings from existing ones by applying linear transformations. (Multiplying all values in a matrix by a scalar)
-# Keys and Queries matrix helps us find the best embeddings (ones that relate words the best when applying attention)
-# K and Q modify our embeddings with matrix multiplication, and then we can calculate similarity as usual
-# Knows features of the words (color, size, features), more similar to transformers encoder
+        # better init, not covered in the original GPT video, but important, will cover in followup video
+        self.apply(self._init_weights)
 
-# Values matrix (more similar to transformers decoder)
-# Multiplies our embedding with K and Q (optimized for finding similarities) by matrix V to create an embedding optimized for generation (finding the next word)
-# Another linear transformation 
-# Knows when two words can appear in the same context (e.g. apple or orange can both work as the next word given a context)
+    def _init_weights(self, module):
+        if isinstance(module, nn.Linear):
+            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
+            if module.bias is not None:
+                torch.nn.init.zeros_(module.bias)
+        elif isinstance(module, nn.Embedding):
+            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
-# Self attention: (Scaled Dot-Product Attention)
-# Perform a linear transformation by multiplying our embedding by k and q
-# Calculate our similarities
-# Apply the Softmax function to our values and then multiply by matrix v to apply another linear transformation 
-# Results in an embedding optimized for predicting the next word
+    def forward(self, idx, targets=None):
+        B, T = idx.shape
 
-# Multi-head attention
-# Multiple layers of Scaled Dot-Product Attention
-# Many heads (many k,q,v matrices)
-# The more layers you use, the better but that means more computing power needed
-# At the end, we concatenate the outputs of our layers, resulting in an embedding with a high number of dimensions
-# Linear step turns our concatenated embeddings into a more manageable, lower dimension 
-# Worse embeddings will be scaled down, better ones will be scaled up
+        # idx and targets are both (B,T) tensor of integers
+        tok_emb = self.token_embedding_table(idx) # (B,T,C)
+        pos_emb = self.position_embedding_table(torch.arange(T, device=device)) # (T,C)
+        x = tok_emb + pos_emb # (B,T,C)
+        x = self.blocks(x) # (B,T,C)
+        x = self.ln_f(x) # (B,T,C)
+        logits = self.lm_head(x) # (B,T,vocab_size)
 
-# K, Q, and V come from weights trained with the transformer model
+        if targets is None:
+            loss = None
+        else:
+            B, T, C = logits.shape
+            logits = logits.view(B*T, C)
+            targets = targets.view(B*T)
+            loss = F.cross_entropy(logits, targets)
 
-# Feed forward neural network attempts to compute the next word or token.
+        return logits, loss
+
+    def generate(self, idx, max_new_tokens):
+        # idx is (B, T) array of indices in the current context
+        for _ in range(max_new_tokens):
+            # crop idx to the last block_size tokens
+            idx_cond = idx[:, -block_size:]
+            # get the predictions
+            logits, loss = self(idx_cond)
+            # focus only on the last time step
+            logits = logits[:, -1, :] # becomes (B, C)
+            # apply softmax to get probabilities
+            probs = F.softmax(logits, dim=-1) # (B, C)
+            # sample from the distribution
+            idx_next = torch.multinomial(probs, num_samples=1) # (B, 1)
+            # append sampled index to the running sequence
+            idx = torch.cat((idx, idx_next), dim=1) # (B, T+1)
+        return idx
+
+model = GPTLanguageModel()
+m = model.to(device)
+# print the number of parameters in the model
+print(sum(p.numel() for p in m.parameters())/1e6, 'M parameters')
+
+# create a PyTorch optimizer
+optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
+
+for iter in range(max_iters):
+
+    # every once in a while evaluate the loss on train and val sets
+    if iter % eval_interval == 0 or iter == max_iters - 1:
+        losses = estimate_loss()
+        print(f"step {iter}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
+
+    # sample a batch of data
+    xb, yb = get_batch('train')
+
+    # evaluate the loss
+    logits, loss = model(xb, yb)
+    optimizer.zero_grad(set_to_none=True)
+    loss.backward()
+    optimizer.step()
+
+# generate from the model
+context = torch.zeros((1, 1), dtype=torch.long, device=device)
+print(decode(m.generate(context, max_new_tokens=500)[0].tolist()))
+open('more.txt', 'w').write(decode(m.generate(context, max_new_tokens=10000)[0].tolist()))
