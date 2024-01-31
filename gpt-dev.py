@@ -18,6 +18,7 @@ dropout = 0.2
 
 torch.manual_seed(1337)
 
+print(device)
 with open('alpaca_data.json', 'r', encoding='utf-8') as r:
     text = r.read()
     print(text[:1000])
@@ -56,6 +57,7 @@ def get_batch(split):
     # Stack creates a tensor with dimensions batch x block
     x = torch.stack([data[i:i+block_size] for i in ix])
     y = torch.stack([data[i+1:i+block_size+1] for i in ix])
+    x, y = x.to(device), y.to(device)
     return x, y
 
 @torch.no_grad()
@@ -105,12 +107,12 @@ class Head(nn.Module):
         k = self.key(x) # (B, T, hs)
         q = self.query(x) # (B, T, hs)
         # compute our attention scores
-        wei = q @ k.transpose(-2,1) * k.shape[-1]**-0.5
+        wei = q @ k.transpose(-2, -1) * k.shape[-1] ** -0.5
         wei = wei.masked_fill(self.tril[:T, :T] == 0, float('-inf'))
         wei = F.softmax(wei, dim=-1)
         wei = self.dropout(wei)
         # perform weighted aggregation of the values
-        v = self.value(v)
+        v = self.value(x)
         out = wei @ v
         return out
 
